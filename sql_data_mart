@@ -1,0 +1,252 @@
+-- создание таблиц справочников и таблиц фактов
+
+
+drop table std6_148.coupons;
+truncate table std6_148.coupons;
+create table std6_148.coupons(
+plant varchar(10),
+calday date,
+coupon_number varchar(100),
+coupon_act varchar(100),
+material int8,
+billnum int8
+)
+with (
+ 	appendonly = true,
+ 	orientation = row,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+)
+distributed replicated
+;
+
+select std6_148.f_load_full('std6_148.coupons', 'coupons');
+select *  from std6_148.coupons;
+
+select plant, count(*) from std6_148.coupons
+group by plant
+
+
+drop table std6_148.promos;
+truncate table std6_148.promos;
+create table std6_148.promos(
+id_promo varchar(100),
+name_promo varchar(100),
+type_promo varchar(10),
+material int8,
+discount_amount int2
+)
+with (
+ 	appendonly = true,
+ 	orientation = row,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+)
+distributed replicated;
+
+select std6_148.f_load_full('std6_148.promos', 'promos');
+select *  from std6_148.promos
+
+
+drop table std6_148.promo_types;
+truncate table std6_148.promo_types;
+create table std6_148.promo_types(
+type_promo varchar(10),
+text varchar(50)
+)
+with (
+ 	appendonly = true,
+ 	orientation = row,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+)
+distributed replicated;
+
+
+drop table std6_148.stores;
+truncate table std6_148.stores;
+create table std6_148.stores(
+plant varchar(10),
+txt varchar(20)
+)
+with (
+ 	appendonly = true,
+ 	orientation = row,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+)
+distributed replicated;
+
+
+
+drop table std6_148.traffic;
+truncate table std6_148.traffic;
+create table std6_148.traffic(
+plant varchar(10),
+date date,
+time varchar(10),
+frame_id varchar(100),
+quantity int4
+)
+with (
+ 	appendonly = true,
+ 	orientation = column,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+ 	)
+distributed randomly
+partition by range (date)
+(start (date '2021-01-01') inclusive
+end (date '2022-01-01') exclusive
+every (interval '1 month'),
+default partition extra
+);
+
+
+
+DROP TABLE std6_148.bills_head;
+truncate table std6_148.bills_head;
+create table std6_148.bills_head(
+billnum int8,
+plant varchar(10),
+calday date
+)
+with (
+ 	appendonly = true,
+ 	orientation = column,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+ 	)
+distributed by (billnum)
+partition by range (calday)
+(start (date '2021-01-01') inclusive
+end (date '2022-01-01') exclusive
+every (interval '1 month'),
+default partition extra
+);
+
+
+
+DROP TABLE std6_148.bills_item;
+truncate table std6_148.bills_item;
+create table std6_148.bills_item(
+billnum int8,
+billitem int8,
+material int8, 
+qty int8,
+netval numeric(17,2),
+tax numeric(17,2),
+rpa_sat numeric(17,2),
+calday date
+)
+with (
+ 	appendonly = true,
+ 	orientation = row,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+ 	)
+distributed by (billnum) 
+partition by range (calday)
+(start (date '2021-01-01') inclusive
+end (date '2022-01-01') exclusive
+every (interval '1 month'),
+default partition extra
+);
+
+      
+-- Создание таблицы для витрины данных
+
+drop table std6_148.datamart_stores_by_day;
+truncate table std6_148.datamart_stores_by_day;
+create table std6_148.datamart_stores_by_day (
+	calday date,
+	plant varchar(10),
+	store_name varchar(20),
+	revenue int8,
+	sum_disc numeric(20,2),
+	revenue_wtht_disc numeric(20,2),
+	sum_qty int8,
+	sum_bills int8,
+	traffic int8,
+	coup_per_bill int8
+)with (
+ 	appendonly = true,
+ 	orientation = column,
+ 	compresstype = zstd,
+ 	compresslevel = 1
+)
+distributed randomly;
+
+
+-- Запрос для формирования данных в витрину
+
+
+CREATE OR REPLACE FUNCTION std6_148.f_load_data_mart(start_date timestamp, end_date timestamp)
+	RETURNS text
+	LANGUAGE plpgsql
+	VOLATILE
+AS $$
+	
+declare
+
+   v_sql text;
+   v_result int;
+
+   BEGIN   
+	
+
+	v_sql =  'with traffic as(
+select plant, sum(quantity) traf from std6_148.traffic
+where date >= '''||start_date||''' and date < '''||end_date||'''
+group by plant
+)
+insert into std6_148.datamart_stores_agg
+select b.plant,
+       s.txt store_name,
+       revenue,
+       sum_disc,
+       revenue-sum_disc revenue_wtht_disc,
+       sum_qty,
+       sum_bills,
+       t.traf traffic,
+       coup_per_bill,
+       round((coup_per_bill*100.1)/sum_qty, 2) mat_by_coupons,
+       round((sum_qty/sum_bills),2) share_disc_prod,
+	   round((sum_bills*100.0)/t.traf,2) convers,
+	   round(revenue/sum_bills*1.0, 2) avg_bill,
+	   round(revenue/t.traf*1.0, 2) rev_per_pers
+from(
+select h.plant,
+	   sum(rpa_sat) revenue,
+	   sum(case when type_promo = ''001'' then discount_amount*1.0
+	    		when type_promo = ''002'' then (rpa_sat*1.0/100)*discount_amount
+	     		end) as sum_disc,
+	   sum(qty) sum_qty,
+	   count(distinct i.billnum) sum_bills,
+	   count(c.coupon_act) coup_per_bill
+from std6_148.bills_item i
+left join std6_148.coupons c
+on c.billnum = i.billnum AND c.material = i.material
+left join std6_148.promos p
+on c.coupon_act = p.id_promo
+join std6_148.bills_head h 
+on h.billnum = i.billnum
+where i.calday >= '''||start_date||''' and i.calday < '''||end_date||'''
+group by h.plant) b
+join traffic t
+on t.plant = b.plant
+join stores s
+on s.plant = b.plant';
+
+	
+	EXECUTE v_sql;
+
+v_result = DATE_part('month', start_date);
+return v_result;
+
+		
+end;
+$$
+execute on any
+
+
