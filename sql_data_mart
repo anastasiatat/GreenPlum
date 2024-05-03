@@ -14,17 +14,18 @@ billnum int8
 with (
  	appendonly = true,
  	orientation = row,
- 	compresstype = zstd,
- 	compresslevel = 1
+ 	compresstype = zstd,  
+ 	compresslevel = 1  --уровень компрессии используемый для таблиц, которые учавствуют в аналитке
 )
-distributed replicated
+distributed by (billnum) 
+partition by range (date)
+(start (date '2021-01-01') inclusive
+end (date '2022-01-01') exclusive
+every (interval '1 month'),
+default partition extra
+)
 ;
 
-select std6_148.f_load_full('std6_148.coupons', 'coupons');
-select *  from std6_148.coupons;
-
-select plant, count(*) from std6_148.coupons
-group by plant
 
 
 drop table std6_148.promos;
@@ -42,10 +43,7 @@ with (
  	compresstype = zstd,
  	compresslevel = 1
 )
-distributed replicated;
-
-select std6_148.f_load_full('std6_148.promos', 'promos');
-select *  from std6_148.promos
+distributed replicated;   --дистрибуция для таблиц справочников, копия таблицы хранится на каждом сегменте бд
 
 
 drop table std6_148.promo_types;
@@ -95,7 +93,7 @@ with (
  	compresslevel = 1
  	)
 distributed randomly
-partition by range (date)
+partition by range (date)  --партиционирование по месяцам, выбрано для быстрого построения месячного или дневного отчета
 (start (date '2021-01-01') inclusive
 end (date '2022-01-01') exclusive
 every (interval '1 month'),
